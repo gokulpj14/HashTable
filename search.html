@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>Search Student</h2>
+<form class="form" method="post">
+	<div class="field">
+		<label for="student_id">Student ID</label>
+		<input id="student_id" name="student_id" required placeholder="Enter ID to search" value="{{ query_id or '' }}">
+	</div>
+	<div class="actions">
+		<button class="btn" type="submit">Search</button>
+	</div>
+	{% if result %}
+	<div class="card">
+		<h3>{{ result.name }} ({{ result.student_id }})</h3>
+		<p><strong>Department:</strong> {{ result.department }}</p>
+		<p><strong>GPA:</strong> {{ "%.2f"|format(result.gpa) }}</p>
+	</div>
+	{% endif %}
+{% endblock %}
+

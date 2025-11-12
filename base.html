@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="utf-8">
+		<meta name="viewport" content="width=device-width, initial-scale=1">
+		<title>Hash Table-Based Student Database</title>
+		<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+	</head>
+	<body>
+		<nav class="nav gradient">
+			<div class="container">
+				<a class="brand" href="{{ url_for('index') }}">Hash Table Student DB</a>
+				<div class="links">
+					<a href="{{ url_for('list_students') }}">Dashboard</a>
+					<a href="{{ url_for('add_student') }}">Add</a>
+					<a href="{{ url_for('search_student') }}">Search</a>
+				</div>
+			</div>
+		</nav>
+		<main class="container">
+			{% with messages = get_flashed_messages(with_categories=true) %}
+			{% if messages %}
+			<ul class="flash">
+				{% for category, message in messages %}
+				<li class="{{ category }}">{{ message }}</li>
+				{% endfor %}
+			</ul>
+			{% endif %}
+			{% endwith %}
+			{% block content %}{% endblock %}
+		</main>
+		<footer class="footer">
+			<div class="container">
+				<p>Demonstration: In-memory Hash Table with Separate Chaining</p>
+			</div>
+		</footer>
+	</body>
+</html>
+

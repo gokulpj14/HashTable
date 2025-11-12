@@ -1,0 +1,88 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="dashboard">
+	<section class="panel">
+		<h2>➕ Add New Student</h2>
+		<form class="form" method="post" action="{{ url_for('add_student') }}">
+			<div class="field">
+				<label for="student_id">Student ID</label>
+				<input id="student_id" name="student_id" required placeholder="e.g., S009">
+			</div>
+			<div class="field">
+				<label for="name">Name</label>
+				<input id="name" name="name" required placeholder="e.g., John Doe">
+			</div>
+			<div class="field grid-2">
+				<div>
+					<label for="age">Age</label>
+					<input id="age" name="age" type="number" min="1" max="120" required placeholder="e.g., 20">
+				</div>
+				<div>
+					<label for="grade">Grade</label>
+					<input id="grade" name="grade" required placeholder="e.g., A, B+">
+				</div>
+			</div>
+			<div class="field">
+				<label for="major">Major</label>
+				<input id="major" name="major" required placeholder="e.g., Computer Science">
+			</div>
+			<div class="actions">
+				<button class="btn" type="submit">Save</button>
+			</div>
+		</form>
+	</section>
+	<section class="panel">
+		<h2>📄 Student Records</h2>
+		<form class="toolbar" method="get" action="{{ url_for('list_students') }}">
+			<input class="search" type="text" name="q" placeholder="Search students..." value="{{ q or '' }}">
+			<select name="sort_by">
+				<option value="student_id" {{ 'selected' if sort_by=='student_id' else '' }}>By ID</option>
+				<option value="name" {{ 'selected' if sort_by=='name' else '' }}>By Name</option>
+				<option value="age" {{ 'selected' if sort_by=='age' else '' }}>By Age</option>
+				<option value="grade" {{ 'selected' if sort_by=='grade' else '' }}>By Grade</option>
+				<option value="major" {{ 'selected' if sort_by=='major' else '' }}>By Major</option>
+			</select>
+			<select name="order">
+				<option value="asc" {{ 'selected' if order=='asc' else '' }}>Ascending</option>
+				<option value="desc" {{ 'selected' if order=='desc' else '' }}>Descending</option>
+			</select>
+			<button class="btn secondary" type="submit">Apply</button>
+		</form>
+		{% if students %}
+		<table class="table fancy">
+			<thead>
+				<tr>
+					<th>Student ID</th>
+					<th>Name</th>
+					<th>Age</th>
+					<th>Grade</th>
+					<th>Major</th>
+					<th>Actions</th>
+				</tr>
+			</thead>
+			<tbody>
+				{% for s in students %}
+				<tr>
+					<td>{{ s.student_id }}</td>
+					<td>{{ s.name }}</td>
+					<td>{{ s.age }}</td>
+					<td>{{ s.grade }}</td>
+					<td>{{ s.major }}</td>
+					<td class="row-actions">
+						<a class="btn small" href="{{ url_for('edit_student', student_id=s.student_id) }}">Edit</a>
+						<form method="post" action="{{ url_for('delete_student') }}" onsubmit="return confirm('Delete {{ s.student_id }}?');">
+							<input type="hidden" name="student_id" value="{{ s.student_id }}">
+							<button class="btn danger small" type="submit">Delete</button>
+						</form>
+					</td>
+				</tr>
+				{% endfor %}
+			</tbody>
+		</table>
+		{% else %}
+		<p>No students yet. Add one on the left.</p>
+		{% endif %}
+	</section>
+</div>
+{% endblock %}
+

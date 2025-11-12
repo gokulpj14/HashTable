@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>Edit Student — {{ s.student_id }}</h2>
+<form class="form" method="post">
+	<div class="field">
+		<label>Student ID</label>
+		<input value="{{ s.student_id }}" disabled>
+	</div>
+	<div class="field">
+		<label for="name">Name</label>
+		<input id="name" name="name" required value="{{ s.name }}">
+	</div>
+	<div class="field grid-2">
+		<div>
+			<label for="age">Age</label>
+			<input id="age" name="age" type="number" min="1" max="120" required value="{{ s.age }}">
+		</div>
+		<div>
+			<label for="grade">Grade</label>
+			<input id="grade" name="grade" required value="{{ s.grade }}">
+		</div>
+	</div>
+	<div class="field">
+		<label for="major">Major</label>
+		<input id="major" name="major" required value="{{ s.major }}">
+	</div>
+	<div class="actions">
+		<button class="btn" type="submit">Save</button>
+		<a class="btn secondary" href="{{ url_for('list_students') }}">Cancel</a>
+	</div>
+</form>
+{% endblock %}
+

@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="hero hero-large">
+	<h1>🎓 Hash Table‑Based Student Database</h1>
+	<p>Fast lookups with hashing, plus search, sorting, and clean CRUD.</p>
+	<div class="actions">
+		<a class="btn" href="{{ url_for('list_students') }}">Open Dashboard</a>
+		<a class="btn secondary" href="{{ url_for('search_student') }}">Quick Search</a>
+	</div>
+</section>
+
+<section class="features">
+	<div class="feature-card">
+		<h3>⚡ O(1) Average Lookup</h3>
+		<p>Student records are keyed by ID and stored with separate chaining.</p>
+	</div>
+	<div class="feature-card">
+		<h3>🔎 Powerful Search</h3>
+		<p>Filter by name, ID, grade, major, or age directly in the dashboard.</p>
+	</div>
+	<div class="feature-card">
+		<h3>📈 Sorting Controls</h3>
+		<p>Sort by any attribute in ascending or descending order.</p>
+	</div>
+</section>
+
+<section class="info">
+	<div class="card">
+		<h2>What is a Hash Table?</h2>
+		<p>
+			A hash table maps keys to indices using a hash function. This app uses a polynomial rolling hash and resolves collisions with separate chaining. 
+			When the load factor grows beyond a threshold, the table resizes to keep operations fast.
+		</p>
+		<ul>
+			<li>Key: <strong>Student ID</strong></li>
+			<li>Value: <strong>Student</strong> (Name, Age, Grade, Major)</li>
+			<li>Collision handling: <strong>Separate chaining</strong></li>
+			<li>Resize policy: <strong>Automatic when load factor exceeds 0.75</strong></li>
+		</ul>
+	</div>
+</section>
+{% endblock %}
+

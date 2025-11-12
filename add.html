@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>Add or Update Student</h2>
+<form class="form" method="post">
+	<div class="field">
+		<label for="student_id">Student ID</label>
+		<input id="student_id" name="student_id" required placeholder="e.g., S12345">
+	</div>
+	<div class="field">
+		<label for="name">Name</label>
+		<input id="name" name="name" required placeholder="e.g., Priya Sharma">
+	</div>
+	<div class="field">
+		<label for="age">Age</label>
+		<input id="age" name="age" required type="number" min="1" max="120" placeholder="e.g., 20">
+	</div>
+	<div class="field">
+		<label for="grade">Grade</label>
+		<input id="grade" name="grade" required placeholder="e.g., A, B+">
+	</div>
+	<div class="field">
+		<label for="major">Major</label>
+		<input id="major" name="major" required placeholder="e.g., Computer Science">
+	</div>
+	<div class="actions">
+		<button class="btn" type="submit">Save</button>
+		<a class="btn secondary" href="{{ url_for('list_students') }}">Cancel</a>
+	</div>
+	<p class="hint">Submitting with an existing ID will update that student.</p>
+</form>
+{% endblock %}
+

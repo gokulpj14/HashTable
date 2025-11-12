@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="card">
+	<h2>Something went wrong</h2>
+	<p>We encountered an unexpected error. Please try again.</p>
+	<p><a class="btn" href="{{ url_for('index') }}">Go Home</a></p>
+</div>
+{% endblock %}
+
