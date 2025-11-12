@@ -1,1010 +1,615 @@
+# mypy: allow-untyped-defs
 from __future__ import annotations
 
-from collections.abc import MutableSet
-from copy import deepcopy
+import collections.abc
+import dataclasses
+import inspect
+from typing import Any
+from typing import Callable
+from typing import Collection
+from typing import final
+from typing import Iterable
+from typing import Iterator
+from typing import Mapping
+from typing import MutableMapping
+from typing import NamedTuple
+from typing import overload
+from typing import Sequence
+from typing import TYPE_CHECKING
+from typing import TypeVar
+from typing import Union
+import warnings
 
-from .. import exceptions
-from .._internal import _missing
-from .mixins import ImmutableDictMixin
-from .mixins import ImmutableListMixin
-from .mixins import ImmutableMultiDictMixin
-from .mixins import UpdateDictMixin
+from .._code import getfslineno
+from ..compat import ascii_escaped
+from ..compat import NOTSET
+from ..compat import NotSetType
+from _pytest.config import Config
+from _pytest.deprecated import check_ispytest
+from _pytest.deprecated import MARKED_FIXTURE
+from _pytest.outcomes import fail
+from _pytest.scope import _ScopeName
+from _pytest.warning_types import PytestUnknownMarkWarning
 
 
-def is_immutable(self):
-    raise TypeError(f"{type(self).__name__!r} objects are immutable")
+if TYPE_CHECKING:
+    from ..nodes import Node
 
 
-def iter_multi_items(mapping):
-    """Iterates over the items of a mapping yielding keys and values
-    without dropping any from more complex structures.
-    """
-    if isinstance(mapping, MultiDict):
-        yield from mapping.items(multi=True)
-    elif isinstance(mapping, dict):
-        for key, value in mapping.items():
-            if isinstance(value, (tuple, list)):
-                for v in value:
-                    yield key, v
-            else:
-                yield key, value
+EMPTY_PARAMETERSET_OPTION = "empty_parameter_set_mark"
+
+
+def istestfunc(func) -> bool:
+    return callable(func) and getattr(func, "__name__", "<lambda>") != "<lambda>"
+
+
+def get_empty_parameterset_mark(
+    config: Config, argnames: Sequence[str], func
+) -> MarkDecorator:
+    from ..nodes import Collector
+
+    fs, lineno = getfslineno(func)
+    reason = "got empty parameter set %r, function %s at %s:%d" % (
+        argnames,
+        func.__name__,
+        fs,
+        lineno,
+    )
+
+    requested_mark = config.getini(EMPTY_PARAMETERSET_OPTION)
+    if requested_mark in ("", None, "skip"):
+        mark = MARK_GEN.skip(reason=reason)
+    elif requested_mark == "xfail":
+        mark = MARK_GEN.xfail(reason=reason, run=False)
+    elif requested_mark == "fail_at_collect":
+        f_name = func.__name__
+        _, lineno = getfslineno(func)
+        raise Collector.CollectError(
+            "Empty parameter set in '%s' at line %d" % (f_name, lineno + 1)
+        )
     else:
-        yield from mapping
+        raise LookupError(requested_mark)
+    return mark
 
 
-class ImmutableList(ImmutableListMixin, list):
-    """An immutable :class:`list`.
-
-    .. versionadded:: 0.5
-
-    :private:
-    """
-
-    def __repr__(self):
-        return f"{type(self).__name__}({list.__repr__(self)})"
-
-
-class TypeConversionDict(dict):
-    """Works like a regular dict but the :meth:`get` method can perform
-    type conversions.  :class:`MultiDict` and :class:`CombinedMultiDict`
-    are subclasses of this class and provide the same feature.
-
-    .. versionadded:: 0.5
-    """
-
-    def get(self, key, default=None, type=None):
-        """Return the default value if the requested data doesn't exist.
-        If `type` is provided and is a callable it should convert the value,
-        return it or raise a :exc:`ValueError` if that is not possible.  In
-        this case the function will return the default as if the value was not
-        found:
-
-        >>> d = TypeConversionDict(foo='42', bar='blub')
-        >>> d.get('foo', type=int)
-        42
-        >>> d.get('bar', -1, type=int)
-        -1
-
-        :param key: The key to be looked up.
-        :param default: The default value to be returned if the key can't
-                        be looked up.  If not further specified `None` is
-                        returned.
-        :param type: A callable that is used to cast the value in the
-                     :class:`MultiDict`.  If a :exc:`ValueError` or a
-                     :exc:`TypeError` is raised by this callable the default
-                     value is returned.
-
-        .. versionchanged:: 3.0.2
-           Returns the default value on :exc:`TypeError`, too.
-        """
-        try:
-            rv = self[key]
-        except KeyError:
-            return default
-        if type is not None:
-            try:
-                rv = type(rv)
-            except (ValueError, TypeError):
-                rv = default
-        return rv
-
-
-class ImmutableTypeConversionDict(ImmutableDictMixin, TypeConversionDict):
-    """Works like a :class:`TypeConversionDict` but does not support
-    modifications.
-
-    .. versionadded:: 0.5
-    """
-
-    def copy(self):
-        """Return a shallow mutable copy of this object.  Keep in mind that
-        the standard library's :func:`copy` function is a no-op for this class
-        like for any other python immutable type (eg: :class:`tuple`).
-        """
-        return TypeConversionDict(self)
-
-    def __copy__(self):
-        return self
-
-
-class MultiDict(TypeConversionDict):
-    """A :class:`MultiDict` is a dictionary subclass customized to deal with
-    multiple values for the same key which is for example used by the parsing
-    functions in the wrappers.  This is necessary because some HTML form
-    elements pass multiple values for the same key.
-
-    :class:`MultiDict` implements all standard dictionary methods.
-    Internally, it saves all values for a key as a list, but the standard dict
-    access methods will only return the first value for a key. If you want to
-    gain access to the other values, too, you have to use the `list` methods as
-    explained below.
-
-    Basic Usage:
-
-    >>> d = MultiDict([('a', 'b'), ('a', 'c')])
-    >>> d
-    MultiDict([('a', 'b'), ('a', 'c')])
-    >>> d['a']
-    'b'
-    >>> d.getlist('a')
-    ['b', 'c']
-    >>> 'a' in d
-    True
-
-    It behaves like a normal dict thus all dict functions will only return the
-    first value when multiple values for one key are found.
-
-    From Werkzeug 0.3 onwards, the `KeyError` raised by this class is also a
-    subclass of the :exc:`~exceptions.BadRequest` HTTP exception and will
-    render a page for a ``400 BAD REQUEST`` if caught in a catch-all for HTTP
-    exceptions.
-
-    A :class:`MultiDict` can be constructed from an iterable of
-    ``(key, value)`` tuples, a dict, a :class:`MultiDict` or from Werkzeug 0.2
-    onwards some keyword parameters.
-
-    :param mapping: the initial value for the :class:`MultiDict`.  Either a
-                    regular dict, an iterable of ``(key, value)`` tuples
-                    or `None`.
-    """
-
-    def __init__(self, mapping=None):
-        if isinstance(mapping, MultiDict):
-            dict.__init__(self, ((k, vs[:]) for k, vs in mapping.lists()))
-        elif isinstance(mapping, dict):
-            tmp = {}
-            for key, value in mapping.items():
-                if isinstance(value, (tuple, list)):
-                    if len(value) == 0:
-                        continue
-                    value = list(value)
-                else:
-                    value = [value]
-                tmp[key] = value
-            dict.__init__(self, tmp)
-        else:
-            tmp = {}
-            for key, value in mapping or ():
-                tmp.setdefault(key, []).append(value)
-            dict.__init__(self, tmp)
-
-    def __getstate__(self):
-        return dict(self.lists())
-
-    def __setstate__(self, value):
-        dict.clear(self)
-        dict.update(self, value)
-
-    def __iter__(self):
-        # Work around https://bugs.python.org/issue43246.
-        # (`return super().__iter__()` also works here, which makes this look
-        # even more like it should be a no-op, yet it isn't.)
-        return dict.__iter__(self)
-
-    def __getitem__(self, key):
-        """Return the first data value for this key;
-        raises KeyError if not found.
-
-        :param key: The key to be looked up.
-        :raise KeyError: if the key does not exist.
-        """
-
-        if key in self:
-            lst = dict.__getitem__(self, key)
-            if len(lst) > 0:
-                return lst[0]
-        raise exceptions.BadRequestKeyError(key)
-
-    def __setitem__(self, key, value):
-        """Like :meth:`add` but removes an existing key first.
-
-        :param key: the key for the value.
-        :param value: the value to set.
-        """
-        dict.__setitem__(self, key, [value])
-
-    def add(self, key, value):
-        """Adds a new value for the key.
-
-        .. versionadded:: 0.6
-
-        :param key: the key for the value.
-        :param value: the value to add.
-        """
-        dict.setdefault(self, key, []).append(value)
-
-    def getlist(self, key, type=None):
-        """Return the list of items for a given key. If that key is not in the
-        `MultiDict`, the return value will be an empty list.  Just like `get`,
-        `getlist` accepts a `type` parameter.  All items will be converted
-        with the callable defined there.
-
-        :param key: The key to be looked up.
-        :param type: A callable that is used to cast the value in the
-                     :class:`MultiDict`.  If a :exc:`ValueError` is raised
-                     by this callable the value will be removed from the list.
-        :return: a :class:`list` of all the values for the key.
-        """
-        try:
-            rv = dict.__getitem__(self, key)
-        except KeyError:
-            return []
-        if type is None:
-            return list(rv)
-        result = []
-        for item in rv:
-            try:
-                result.append(type(item))
-            except ValueError:
-                pass
-        return result
-
-    def setlist(self, key, new_list):
-        """Remove the old values for a key and add new ones.  Note that the list
-        you pass the values in will be shallow-copied before it is inserted in
-        the dictionary.
-
-        >>> d = MultiDict()
-        >>> d.setlist('foo', ['1', '2'])
-        >>> d['foo']
-        '1'
-        >>> d.getlist('foo')
-        ['1', '2']
-
-        :param key: The key for which the values are set.
-        :param new_list: An iterable with the new values for the key.  Old values
-                         are removed first.
-        """
-        dict.__setitem__(self, key, list(new_list))
-
-    def setdefault(self, key, default=None):
-        """Returns the value for the key if it is in the dict, otherwise it
-        returns `default` and sets that value for `key`.
-
-        :param key: The key to be looked up.
-        :param default: The default value to be returned if the key is not
-                        in the dict.  If not further specified it's `None`.
-        """
-        if key not in self:
-            self[key] = default
-        else:
-            default = self[key]
-        return default
-
-    def setlistdefault(self, key, default_list=None):
-        """Like `setdefault` but sets multiple values.  The list returned
-        is not a copy, but the list that is actually used internally.  This
-        means that you can put new values into the dict by appending items
-        to the list:
-
-        >>> d = MultiDict({"foo": 1})
-        >>> d.setlistdefault("foo").extend([2, 3])
-        >>> d.getlist("foo")
-        [1, 2, 3]
-
-        :param key: The key to be looked up.
-        :param default_list: An iterable of default values.  It is either copied
-                             (in case it was a list) or converted into a list
-                             before returned.
-        :return: a :class:`list`
-        """
-        if key not in self:
-            default_list = list(default_list or ())
-            dict.__setitem__(self, key, default_list)
-        else:
-            default_list = dict.__getitem__(self, key)
-        return default_list
-
-    def items(self, multi=False):
-        """Return an iterator of ``(key, value)`` pairs.
-
-        :param multi: If set to `True` the iterator returned will have a pair
-                      for each value of each key.  Otherwise it will only
-                      contain pairs for the first value of each key.
-        """
-        for key, values in dict.items(self):
-            if multi:
-                for value in values:
-                    yield key, value
-            else:
-                yield key, values[0]
-
-    def lists(self):
-        """Return a iterator of ``(key, values)`` pairs, where values is the list
-        of all values associated with the key."""
-        for key, values in dict.items(self):
-            yield key, list(values)
-
-    def values(self):
-        """Returns an iterator of the first value on every key's value list."""
-        for values in dict.values(self):
-            yield values[0]
-
-    def listvalues(self):
-        """Return an iterator of all values associated with a key.  Zipping
-        :meth:`keys` and this is the same as calling :meth:`lists`:
-
-        >>> d = MultiDict({"foo": [1, 2, 3]})
-        >>> zip(d.keys(), d.listvalues()) == d.lists()
-        True
-        """
-        return dict.values(self)
-
-    def copy(self):
-        """Return a shallow copy of this object."""
-        return self.__class__(self)
-
-    def deepcopy(self, memo=None):
-        """Return a deep copy of this object."""
-        return self.__class__(deepcopy(self.to_dict(flat=False), memo))
-
-    def to_dict(self, flat=True):
-        """Return the contents as regular dict.  If `flat` is `True` the
-        returned dict will only have the first item present, if `flat` is
-        `False` all values will be returned as lists.
-
-        :param flat: If set to `False` the dict returned will have lists
-                     with all the values in it.  Otherwise it will only
-                     contain the first value for each key.
-        :return: a :class:`dict`
-        """
-        if flat:
-            return dict(self.items())
-        return dict(self.lists())
-
-    def update(self, mapping):
-        """update() extends rather than replaces existing key lists:
-
-        >>> a = MultiDict({'x': 1})
-        >>> b = MultiDict({'x': 2, 'y': 3})
-        >>> a.update(b)
-        >>> a
-        MultiDict([('y', 3), ('x', 1), ('x', 2)])
-
-        If the value list for a key in ``other_dict`` is empty, no new values
-        will be added to the dict and the key will not be created:
-
-        >>> x = {'empty_list': []}
-        >>> y = MultiDict()
-        >>> y.update(x)
-        >>> y
-        MultiDict([])
-        """
-        for key, value in iter_multi_items(mapping):
-            MultiDict.add(self, key, value)
-
-    def pop(self, key, default=_missing):
-        """Pop the first item for a list on the dict.  Afterwards the
-        key is removed from the dict, so additional values are discarded:
-
-        >>> d = MultiDict({"foo": [1, 2, 3]})
-        >>> d.pop("foo")
-        1
-        >>> "foo" in d
-        False
-
-        :param key: the key to pop.
-        :param default: if provided the value to return if the key was
-                        not in the dictionary.
-        """
-        try:
-            lst = dict.pop(self, key)
-
-            if len(lst) == 0:
-                raise exceptions.BadRequestKeyError(key)
-
-            return lst[0]
-        except KeyError:
-            if default is not _missing:
-                return default
-
-            raise exceptions.BadRequestKeyError(key) from None
-
-    def popitem(self):
-        """Pop an item from the dict."""
-        try:
-            item = dict.popitem(self)
-
-            if len(item[1]) == 0:
-                raise exceptions.BadRequestKeyError(item[0])
-
-            return (item[0], item[1][0])
-        except KeyError as e:
-            raise exceptions.BadRequestKeyError(e.args[0]) from None
-
-    def poplist(self, key):
-        """Pop the list for a key from the dict.  If the key is not in the dict
-        an empty list is returned.
-
-        .. versionchanged:: 0.5
-           If the key does no longer exist a list is returned instead of
-           raising an error.
-        """
-        return dict.pop(self, key, [])
-
-    def popitemlist(self):
-        """Pop a ``(key, list)`` tuple from the dict."""
-        try:
-            return dict.popitem(self)
-        except KeyError as e:
-            raise exceptions.BadRequestKeyError(e.args[0]) from None
-
-    def __copy__(self):
-        return self.copy()
-
-    def __deepcopy__(self, memo):
-        return self.deepcopy(memo=memo)
-
-    def __repr__(self):
-        return f"{type(self).__name__}({list(self.items(multi=True))!r})"
-
-
-class _omd_bucket:
-    """Wraps values in the :class:`OrderedMultiDict`.  This makes it
-    possible to keep an order over multiple different keys.  It requires
-    a lot of extra memory and slows down access a lot, but makes it
-    possible to access elements in O(1) and iterate in O(n).
-    """
-
-    __slots__ = ("prev", "key", "value", "next")
-
-    def __init__(self, omd, key, value):
-        self.prev = omd._last_bucket
-        self.key = key
-        self.value = value
-        self.next = None
-
-        if omd._first_bucket is None:
-            omd._first_bucket = self
-        if omd._last_bucket is not None:
-            omd._last_bucket.next = self
-        omd._last_bucket = self
-
-    def unlink(self, omd):
-        if self.prev:
-            self.prev.next = self.next
-        if self.next:
-            self.next.prev = self.prev
-        if omd._first_bucket is self:
-            omd._first_bucket = self.next
-        if omd._last_bucket is self:
-            omd._last_bucket = self.prev
-
-
-class OrderedMultiDict(MultiDict):
-    """Works like a regular :class:`MultiDict` but preserves the
-    order of the fields.  To convert the ordered multi dict into a
-    list you can use the :meth:`items` method and pass it ``multi=True``.
-
-    In general an :class:`OrderedMultiDict` is an order of magnitude
-    slower than a :class:`MultiDict`.
-
-    .. admonition:: note
-
-       Due to a limitation in Python you cannot convert an ordered
-       multi dict into a regular dict by using ``dict(multidict)``.
-       Instead you have to use the :meth:`to_dict` method, otherwise
-       the internal bucket objects are exposed.
-    """
-
-    def __init__(self, mapping=None):
-        dict.__init__(self)
-        self._first_bucket = self._last_bucket = None
-        if mapping is not None:
-            OrderedMultiDict.update(self, mapping)
-
-    def __eq__(self, other):
-        if not isinstance(other, MultiDict):
-            return NotImplemented
-        if isinstance(other, OrderedMultiDict):
-            iter1 = iter(self.items(multi=True))
-            iter2 = iter(other.items(multi=True))
-            try:
-                for k1, v1 in iter1:
-                    k2, v2 = next(iter2)
-                    if k1 != k2 or v1 != v2:
-                        return False
-            except StopIteration:
-                return False
-            try:
-                next(iter2)
-            except StopIteration:
-                return True
-            return False
-        if len(self) != len(other):
-            return False
-        for key, values in self.lists():
-            if other.getlist(key) != values:
-                return False
-        return True
-
-    __hash__ = None
-
-    def __reduce_ex__(self, protocol):
-        return type(self), (list(self.items(multi=True)),)
-
-    def __getstate__(self):
-        return list(self.items(multi=True))
-
-    def __setstate__(self, values):
-        dict.clear(self)
-        for key, value in values:
-            self.add(key, value)
-
-    def __getitem__(self, key):
-        if key in self:
-            return dict.__getitem__(self, key)[0].value
-        raise exceptions.BadRequestKeyError(key)
-
-    def __setitem__(self, key, value):
-        self.poplist(key)
-        self.add(key, value)
-
-    def __delitem__(self, key):
-        self.pop(key)
-
-    def keys(self):
-        return (key for key, value in self.items())
-
-    def __iter__(self):
-        return iter(self.keys())
-
-    def values(self):
-        return (value for key, value in self.items())
-
-    def items(self, multi=False):
-        ptr = self._first_bucket
-        if multi:
-            while ptr is not None:
-                yield ptr.key, ptr.value
-                ptr = ptr.next
-        else:
-            returned_keys = set()
-            while ptr is not None:
-                if ptr.key not in returned_keys:
-                    returned_keys.add(ptr.key)
-                    yield ptr.key, ptr.value
-                ptr = ptr.next
-
-    def lists(self):
-        returned_keys = set()
-        ptr = self._first_bucket
-        while ptr is not None:
-            if ptr.key not in returned_keys:
-                yield ptr.key, self.getlist(ptr.key)
-                returned_keys.add(ptr.key)
-            ptr = ptr.next
-
-    def listvalues(self):
-        for _key, values in self.lists():
-            yield values
-
-    def add(self, key, value):
-        dict.setdefault(self, key, []).append(_omd_bucket(self, key, value))
-
-    def getlist(self, key, type=None):
-        try:
-            rv = dict.__getitem__(self, key)
-        except KeyError:
-            return []
-        if type is None:
-            return [x.value for x in rv]
-        result = []
-        for item in rv:
-            try:
-                result.append(type(item.value))
-            except ValueError:
-                pass
-        return result
-
-    def setlist(self, key, new_list):
-        self.poplist(key)
-        for value in new_list:
-            self.add(key, value)
-
-    def setlistdefault(self, key, default_list=None):
-        raise TypeError("setlistdefault is unsupported for ordered multi dicts")
-
-    def update(self, mapping):
-        for key, value in iter_multi_items(mapping):
-            OrderedMultiDict.add(self, key, value)
-
-    def poplist(self, key):
-        buckets = dict.pop(self, key, ())
-        for bucket in buckets:
-            bucket.unlink(self)
-        return [x.value for x in buckets]
-
-    def pop(self, key, default=_missing):
-        try:
-            buckets = dict.pop(self, key)
-        except KeyError:
-            if default is not _missing:
-                return default
-
-            raise exceptions.BadRequestKeyError(key) from None
-
-        for bucket in buckets:
-            bucket.unlink(self)
-
-        return buckets[0].value
-
-    def popitem(self):
-        try:
-            key, buckets = dict.popitem(self)
-        except KeyError as e:
-            raise exceptions.BadRequestKeyError(e.args[0]) from None
-
-        for bucket in buckets:
-            bucket.unlink(self)
-
-        return key, buckets[0].value
-
-    def popitemlist(self):
-        try:
-            key, buckets = dict.popitem(self)
-        except KeyError as e:
-            raise exceptions.BadRequestKeyError(e.args[0]) from None
-
-        for bucket in buckets:
-            bucket.unlink(self)
-
-        return key, [x.value for x in buckets]
-
-
-class CombinedMultiDict(ImmutableMultiDictMixin, MultiDict):
-    """A read only :class:`MultiDict` that you can pass multiple :class:`MultiDict`
-    instances as sequence and it will combine the return values of all wrapped
-    dicts:
-
-    >>> from werkzeug.datastructures import CombinedMultiDict, MultiDict
-    >>> post = MultiDict([('foo', 'bar')])
-    >>> get = MultiDict([('blub', 'blah')])
-    >>> combined = CombinedMultiDict([get, post])
-    >>> combined['foo']
-    'bar'
-    >>> combined['blub']
-    'blah'
-
-    This works for all read operations and will raise a `TypeError` for
-    methods that usually change data which isn't possible.
-
-    From Werkzeug 0.3 onwards, the `KeyError` raised by this class is also a
-    subclass of the :exc:`~exceptions.BadRequest` HTTP exception and will
-    render a page for a ``400 BAD REQUEST`` if caught in a catch-all for HTTP
-    exceptions.
-    """
-
-    def __reduce_ex__(self, protocol):
-        return type(self), (self.dicts,)
-
-    def __init__(self, dicts=None):
-        self.dicts = list(dicts) or []
+class ParameterSet(NamedTuple):
+    values: Sequence[object | NotSetType]
+    marks: Collection[MarkDecorator | Mark]
+    id: str | None
 
     @classmethod
-    def fromkeys(cls, keys, value=None):
-        raise TypeError(f"cannot create {cls.__name__!r} instances by fromkeys")
+    def param(
+        cls,
+        *values: object,
+        marks: MarkDecorator | Collection[MarkDecorator | Mark] = (),
+        id: str | None = None,
+    ) -> ParameterSet:
+        if isinstance(marks, MarkDecorator):
+            marks = (marks,)
+        else:
+            assert isinstance(marks, collections.abc.Collection)
 
-    def __getitem__(self, key):
-        for d in self.dicts:
-            if key in d:
-                return d[key]
-        raise exceptions.BadRequestKeyError(key)
+        if id is not None:
+            if not isinstance(id, str):
+                raise TypeError(f"Expected id to be a string, got {type(id)}: {id!r}")
+            id = ascii_escaped(id)
+        return cls(values, marks, id)
 
-    def get(self, key, default=None, type=None):
-        for d in self.dicts:
-            if key in d:
-                if type is not None:
-                    try:
-                        return type(d[key])
-                    except ValueError:
-                        continue
-                return d[key]
-        return default
+    @classmethod
+    def extract_from(
+        cls,
+        parameterset: ParameterSet | Sequence[object] | object,
+        force_tuple: bool = False,
+    ) -> ParameterSet:
+        """Extract from an object or objects.
 
-    def getlist(self, key, type=None):
-        rv = []
-        for d in self.dicts:
-            rv.extend(d.getlist(key, type))
-        return rv
+        :param parameterset:
+            A legacy style parameterset that may or may not be a tuple,
+            and may or may not be wrapped into a mess of mark objects.
 
-    def _keys_impl(self):
-        """This function exists so __len__ can be implemented more efficiently,
-        saving one list creation from an iterator.
+        :param force_tuple:
+            Enforce tuple wrapping so single argument tuple values
+            don't get decomposed and break tests.
         """
-        rv = set()
-        rv.update(*self.dicts)
-        return rv
+        if isinstance(parameterset, cls):
+            return parameterset
+        if force_tuple:
+            return cls.param(parameterset)
+        else:
+            # TODO: Refactor to fix this type-ignore. Currently the following
+            # passes type-checking but crashes:
+            #
+            #   @pytest.mark.parametrize(('x', 'y'), [1, 2])
+            #   def test_foo(x, y): pass
+            return cls(parameterset, marks=[], id=None)  # type: ignore[arg-type]
 
-    def keys(self):
-        return self._keys_impl()
+    @staticmethod
+    def _parse_parametrize_args(
+        argnames: str | Sequence[str],
+        argvalues: Iterable[ParameterSet | Sequence[object] | object],
+        *args,
+        **kwargs,
+    ) -> tuple[Sequence[str], bool]:
+        if isinstance(argnames, str):
+            argnames = [x.strip() for x in argnames.split(",") if x.strip()]
+            force_tuple = len(argnames) == 1
+        else:
+            force_tuple = False
+        return argnames, force_tuple
 
-    def __iter__(self):
-        return iter(self.keys())
+    @staticmethod
+    def _parse_parametrize_parameters(
+        argvalues: Iterable[ParameterSet | Sequence[object] | object],
+        force_tuple: bool,
+    ) -> list[ParameterSet]:
+        return [
+            ParameterSet.extract_from(x, force_tuple=force_tuple) for x in argvalues
+        ]
 
-    def items(self, multi=False):
-        found = set()
-        for d in self.dicts:
-            for key, value in d.items(multi):
-                if multi:
-                    yield key, value
-                elif key not in found:
-                    found.add(key)
-                    yield key, value
+    @classmethod
+    def _for_parametrize(
+        cls,
+        argnames: str | Sequence[str],
+        argvalues: Iterable[ParameterSet | Sequence[object] | object],
+        func,
+        config: Config,
+        nodeid: str,
+    ) -> tuple[Sequence[str], list[ParameterSet]]:
+        argnames, force_tuple = cls._parse_parametrize_args(argnames, argvalues)
+        parameters = cls._parse_parametrize_parameters(argvalues, force_tuple)
+        del argvalues
 
-    def values(self):
-        for _key, value in self.items():
-            yield value
+        if parameters:
+            # Check all parameter sets have the correct number of values.
+            for param in parameters:
+                if len(param.values) != len(argnames):
+                    msg = (
+                        '{nodeid}: in "parametrize" the number of names ({names_len}):\n'
+                        "  {names}\n"
+                        "must be equal to the number of values ({values_len}):\n"
+                        "  {values}"
+                    )
+                    fail(
+                        msg.format(
+                            nodeid=nodeid,
+                            values=param.values,
+                            names=argnames,
+                            names_len=len(argnames),
+                            values_len=len(param.values),
+                        ),
+                        pytrace=False,
+                    )
+        else:
+            # Empty parameter set (likely computed at runtime): create a single
+            # parameter set with NOTSET values, with the "empty parameter set" mark applied to it.
+            mark = get_empty_parameterset_mark(config, argnames, func)
+            parameters.append(
+                ParameterSet(values=(NOTSET,) * len(argnames), marks=[mark], id=None)
+            )
+        return argnames, parameters
 
-    def lists(self):
-        rv = {}
-        for d in self.dicts:
-            for key, values in d.lists():
-                rv.setdefault(key, []).extend(values)
-        return list(rv.items())
 
-    def listvalues(self):
-        return (x[1] for x in self.lists())
+@final
+@dataclasses.dataclass(frozen=True)
+class Mark:
+    """A pytest mark."""
 
-    def copy(self):
-        """Return a shallow mutable copy of this object.
+    #: Name of the mark.
+    name: str
+    #: Positional arguments of the mark decorator.
+    args: tuple[Any, ...]
+    #: Keyword arguments of the mark decorator.
+    kwargs: Mapping[str, Any]
 
-        This returns a :class:`MultiDict` representing the data at the
-        time of copying. The copy will no longer reflect changes to the
-        wrapped dicts.
+    #: Source Mark for ids with parametrize Marks.
+    _param_ids_from: Mark | None = dataclasses.field(default=None, repr=False)
+    #: Resolved/generated ids with parametrize Marks.
+    _param_ids_generated: Sequence[str] | None = dataclasses.field(
+        default=None, repr=False
+    )
 
-        .. versionchanged:: 0.15
-            Return a mutable :class:`MultiDict`.
+    def __init__(
+        self,
+        name: str,
+        args: tuple[Any, ...],
+        kwargs: Mapping[str, Any],
+        param_ids_from: Mark | None = None,
+        param_ids_generated: Sequence[str] | None = None,
+        *,
+        _ispytest: bool = False,
+    ) -> None:
+        """:meta private:"""
+        check_ispytest(_ispytest)
+        # Weirdness to bypass frozen=True.
+        object.__setattr__(self, "name", name)
+        object.__setattr__(self, "args", args)
+        object.__setattr__(self, "kwargs", kwargs)
+        object.__setattr__(self, "_param_ids_from", param_ids_from)
+        object.__setattr__(self, "_param_ids_generated", param_ids_generated)
+
+    def _has_param_ids(self) -> bool:
+        return "ids" in self.kwargs or len(self.args) >= 4
+
+    def combined_with(self, other: Mark) -> Mark:
+        """Return a new Mark which is a combination of this
+        Mark and another Mark.
+
+        Combines by appending args and merging kwargs.
+
+        :param Mark other: The mark to combine with.
+        :rtype: Mark
         """
-        return MultiDict(self)
+        assert self.name == other.name
 
-    def to_dict(self, flat=True):
-        """Return the contents as regular dict.  If `flat` is `True` the
-        returned dict will only have the first item present, if `flat` is
-        `False` all values will be returned as lists.
+        # Remember source of ids with parametrize Marks.
+        param_ids_from: Mark | None = None
+        if self.name == "parametrize":
+            if other._has_param_ids():
+                param_ids_from = other
+            elif self._has_param_ids():
+                param_ids_from = self
 
-        :param flat: If set to `False` the dict returned will have lists
-                     with all the values in it.  Otherwise it will only
-                     contain the first item for each key.
-        :return: a :class:`dict`
-        """
-        if flat:
-            return dict(self.items())
-
-        return dict(self.lists())
-
-    def __len__(self):
-        return len(self._keys_impl())
-
-    def __contains__(self, key):
-        for d in self.dicts:
-            if key in d:
-                return True
-        return False
-
-    def __repr__(self):
-        return f"{type(self).__name__}({self.dicts!r})"
+        return Mark(
+            self.name,
+            self.args + other.args,
+            dict(self.kwargs, **other.kwargs),
+            param_ids_from=param_ids_from,
+            _ispytest=True,
+        )
 
 
-class ImmutableDict(ImmutableDictMixin, dict):
-    """An immutable :class:`dict`.
-
-    .. versionadded:: 0.5
-    """
-
-    def __repr__(self):
-        return f"{type(self).__name__}({dict.__repr__(self)})"
-
-    def copy(self):
-        """Return a shallow mutable copy of this object.  Keep in mind that
-        the standard library's :func:`copy` function is a no-op for this class
-        like for any other python immutable type (eg: :class:`tuple`).
-        """
-        return dict(self)
-
-    def __copy__(self):
-        return self
+# A generic parameter designating an object to which a Mark may
+# be applied -- a test function (callable) or class.
+# Note: a lambda is not allowed, but this can't be represented.
+Markable = TypeVar("Markable", bound=Union[Callable[..., object], type])
 
 
-class ImmutableMultiDict(ImmutableMultiDictMixin, MultiDict):
-    """An immutable :class:`MultiDict`.
+@dataclasses.dataclass
+class MarkDecorator:
+    """A decorator for applying a mark on test functions and classes.
 
-    .. versionadded:: 0.5
-    """
+    ``MarkDecorators`` are created with ``pytest.mark``::
 
-    def copy(self):
-        """Return a shallow mutable copy of this object.  Keep in mind that
-        the standard library's :func:`copy` function is a no-op for this class
-        like for any other python immutable type (eg: :class:`tuple`).
-        """
-        return MultiDict(self)
+        mark1 = pytest.mark.NAME  # Simple MarkDecorator
+        mark2 = pytest.mark.NAME(name1=value)  # Parametrized MarkDecorator
 
-    def __copy__(self):
-        return self
+    and can then be applied as decorators to test functions::
 
-
-class ImmutableOrderedMultiDict(ImmutableMultiDictMixin, OrderedMultiDict):
-    """An immutable :class:`OrderedMultiDict`.
-
-    .. versionadded:: 0.6
-    """
-
-    def _iter_hashitems(self):
-        return enumerate(self.items(multi=True))
-
-    def copy(self):
-        """Return a shallow mutable copy of this object.  Keep in mind that
-        the standard library's :func:`copy` function is a no-op for this class
-        like for any other python immutable type (eg: :class:`tuple`).
-        """
-        return OrderedMultiDict(self)
-
-    def __copy__(self):
-        return self
-
-
-class CallbackDict(UpdateDictMixin, dict):
-    """A dict that calls a function passed every time something is changed.
-    The function is passed the dict instance.
-    """
-
-    def __init__(self, initial=None, on_update=None):
-        dict.__init__(self, initial or ())
-        self.on_update = on_update
-
-    def __repr__(self):
-        return f"<{type(self).__name__} {dict.__repr__(self)}>"
-
-
-class HeaderSet(MutableSet):
-    """Similar to the :class:`ETags` class this implements a set-like structure.
-    Unlike :class:`ETags` this is case insensitive and used for vary, allow, and
-    content-language headers.
-
-    If not constructed using the :func:`parse_set_header` function the
-    instantiation works like this:
-
-    >>> hs = HeaderSet(['foo', 'bar', 'baz'])
-    >>> hs
-    HeaderSet(['foo', 'bar', 'baz'])
-    """
-
-    def __init__(self, headers=None, on_update=None):
-        self._headers = list(headers or ())
-        self._set = {x.lower() for x in self._headers}
-        self.on_update = on_update
-
-    def add(self, header):
-        """Add a new header to the set."""
-        self.update((header,))
-
-    def remove(self, header):
-        """Remove a header from the set.  This raises an :exc:`KeyError` if the
-        header is not in the set.
-
-        .. versionchanged:: 0.5
-            In older versions a :exc:`IndexError` was raised instead of a
-            :exc:`KeyError` if the object was missing.
-
-        :param header: the header to be removed.
-        """
-        key = header.lower()
-        if key not in self._set:
-            raise KeyError(header)
-        self._set.remove(key)
-        for idx, key in enumerate(self._headers):
-            if key.lower() == header:
-                del self._headers[idx]
-                break
-        if self.on_update is not None:
-            self.on_update(self)
-
-    def update(self, iterable):
-        """Add all the headers from the iterable to the set.
-
-        :param iterable: updates the set with the items from the iterable.
-        """
-        inserted_any = False
-        for header in iterable:
-            key = header.lower()
-            if key not in self._set:
-                self._headers.append(header)
-                self._set.add(key)
-                inserted_any = True
-        if inserted_any and self.on_update is not None:
-            self.on_update(self)
-
-    def discard(self, header):
-        """Like :meth:`remove` but ignores errors.
-
-        :param header: the header to be discarded.
-        """
-        try:
-            self.remove(header)
-        except KeyError:
+        @mark2
+        def test_function():
             pass
 
-    def find(self, header):
-        """Return the index of the header in the set or return -1 if not found.
+    When a ``MarkDecorator`` is called, it does the following:
 
-        :param header: the header to be looked up.
+    1. If called with a single class as its only positional argument and no
+       additional keyword arguments, it attaches the mark to the class so it
+       gets applied automatically to all test cases found in that class.
+
+    2. If called with a single function as its only positional argument and
+       no additional keyword arguments, it attaches the mark to the function,
+       containing all the arguments already stored internally in the
+       ``MarkDecorator``.
+
+    3. When called in any other case, it returns a new ``MarkDecorator``
+       instance with the original ``MarkDecorator``'s content updated with
+       the arguments passed to this call.
+
+    Note: The rules above prevent a ``MarkDecorator`` from storing only a
+    single function or class reference as its positional argument with no
+    additional keyword or positional arguments. You can work around this by
+    using `with_args()`.
+    """
+
+    mark: Mark
+
+    def __init__(self, mark: Mark, *, _ispytest: bool = False) -> None:
+        """:meta private:"""
+        check_ispytest(_ispytest)
+        self.mark = mark
+
+    @property
+    def name(self) -> str:
+        """Alias for mark.name."""
+        return self.mark.name
+
+    @property
+    def args(self) -> tuple[Any, ...]:
+        """Alias for mark.args."""
+        return self.mark.args
+
+    @property
+    def kwargs(self) -> Mapping[str, Any]:
+        """Alias for mark.kwargs."""
+        return self.mark.kwargs
+
+    @property
+    def markname(self) -> str:
+        """:meta private:"""
+        return self.name  # for backward-compat (2.4.1 had this attr)
+
+    def with_args(self, *args: object, **kwargs: object) -> MarkDecorator:
+        """Return a MarkDecorator with extra arguments added.
+
+        Unlike calling the MarkDecorator, with_args() can be used even
+        if the sole argument is a callable/class.
         """
-        header = header.lower()
-        for idx, item in enumerate(self._headers):
-            if item.lower() == header:
-                return idx
-        return -1
+        mark = Mark(self.name, args, kwargs, _ispytest=True)
+        return MarkDecorator(self.mark.combined_with(mark), _ispytest=True)
 
-    def index(self, header):
-        """Return the index of the header in the set or raise an
-        :exc:`IndexError`.
+    # Type ignored because the overloads overlap with an incompatible
+    # return type. Not much we can do about that. Thankfully mypy picks
+    # the first match so it works out even if we break the rules.
+    @overload
+    def __call__(self, arg: Markable) -> Markable:  # type: ignore[overload-overlap]
+        pass
 
-        :param header: the header to be looked up.
-        """
-        rv = self.find(header)
-        if rv < 0:
-            raise IndexError(header)
-        return rv
+    @overload
+    def __call__(self, *args: object, **kwargs: object) -> MarkDecorator:
+        pass
 
-    def clear(self):
-        """Clear the set."""
-        self._set.clear()
-        del self._headers[:]
-        if self.on_update is not None:
-            self.on_update(self)
-
-    def as_set(self, preserve_casing=False):
-        """Return the set as real python set type.  When calling this, all
-        the items are converted to lowercase and the ordering is lost.
-
-        :param preserve_casing: if set to `True` the items in the set returned
-                                will have the original case like in the
-                                :class:`HeaderSet`, otherwise they will
-                                be lowercase.
-        """
-        if preserve_casing:
-            return set(self._headers)
-        return set(self._set)
-
-    def to_header(self):
-        """Convert the header set into an HTTP header string."""
-        return ", ".join(map(http.quote_header_value, self._headers))
-
-    def __getitem__(self, idx):
-        return self._headers[idx]
-
-    def __delitem__(self, idx):
-        rv = self._headers.pop(idx)
-        self._set.remove(rv.lower())
-        if self.on_update is not None:
-            self.on_update(self)
-
-    def __setitem__(self, idx, value):
-        old = self._headers[idx]
-        self._set.remove(old.lower())
-        self._headers[idx] = value
-        self._set.add(value.lower())
-        if self.on_update is not None:
-            self.on_update(self)
-
-    def __contains__(self, header):
-        return header.lower() in self._set
-
-    def __len__(self):
-        return len(self._set)
-
-    def __iter__(self):
-        return iter(self._headers)
-
-    def __bool__(self):
-        return bool(self._set)
-
-    def __str__(self):
-        return self.to_header()
-
-    def __repr__(self):
-        return f"{type(self).__name__}({self._headers!r})"
+    def __call__(self, *args: object, **kwargs: object):
+        """Call the MarkDecorator."""
+        if args and not kwargs:
+            func = args[0]
+            is_class = inspect.isclass(func)
+            if len(args) == 1 and (istestfunc(func) or is_class):
+                store_mark(func, self.mark, stacklevel=3)
+                return func
+        return self.with_args(*args, **kwargs)
 
 
-# circular dependencies
-from .. import http
+def get_unpacked_marks(
+    obj: object | type,
+    *,
+    consider_mro: bool = True,
+) -> list[Mark]:
+    """Obtain the unpacked marks that are stored on an object.
+
+    If obj is a class and consider_mro is true, return marks applied to
+    this class and all of its super-classes in MRO order. If consider_mro
+    is false, only return marks applied directly to this class.
+    """
+    if isinstance(obj, type):
+        if not consider_mro:
+            mark_lists = [obj.__dict__.get("pytestmark", [])]
+        else:
+            mark_lists = [
+                x.__dict__.get("pytestmark", []) for x in reversed(obj.__mro__)
+            ]
+        mark_list = []
+        for item in mark_lists:
+            if isinstance(item, list):
+                mark_list.extend(item)
+            else:
+                mark_list.append(item)
+    else:
+        mark_attribute = getattr(obj, "pytestmark", [])
+        if isinstance(mark_attribute, list):
+            mark_list = mark_attribute
+        else:
+            mark_list = [mark_attribute]
+    return list(normalize_mark_list(mark_list))
+
+
+def normalize_mark_list(
+    mark_list: Iterable[Mark | MarkDecorator],
+) -> Iterable[Mark]:
+    """
+    Normalize an iterable of Mark or MarkDecorator objects into a list of marks
+    by retrieving the `mark` attribute on MarkDecorator instances.
+
+    :param mark_list: marks to normalize
+    :returns: A new list of the extracted Mark objects
+    """
+    for mark in mark_list:
+        mark_obj = getattr(mark, "mark", mark)
+        if not isinstance(mark_obj, Mark):
+            raise TypeError(f"got {mark_obj!r} instead of Mark")
+        yield mark_obj
+
+
+def store_mark(obj, mark: Mark, *, stacklevel: int = 2) -> None:
+    """Store a Mark on an object.
+
+    This is used to implement the Mark declarations/decorators correctly.
+    """
+    assert isinstance(mark, Mark), mark
+
+    from ..fixtures import getfixturemarker
+
+    if getfixturemarker(obj) is not None:
+        warnings.warn(MARKED_FIXTURE, stacklevel=stacklevel)
+
+    # Always reassign name to avoid updating pytestmark in a reference that
+    # was only borrowed.
+    obj.pytestmark = [*get_unpacked_marks(obj, consider_mro=False), mark]
+
+
+# Typing for builtin pytest marks. This is cheating; it gives builtin marks
+# special privilege, and breaks modularity. But practicality beats purity...
+if TYPE_CHECKING:
+
+    class _SkipMarkDecorator(MarkDecorator):
+        @overload  # type: ignore[override,no-overload-impl]
+        def __call__(self, arg: Markable) -> Markable: ...
+
+        @overload
+        def __call__(self, reason: str = ...) -> MarkDecorator: ...
+
+    class _SkipifMarkDecorator(MarkDecorator):
+        def __call__(  # type: ignore[override]
+            self,
+            condition: str | bool = ...,
+            *conditions: str | bool,
+            reason: str = ...,
+        ) -> MarkDecorator: ...
+
+    class _XfailMarkDecorator(MarkDecorator):
+        @overload  # type: ignore[override,no-overload-impl]
+        def __call__(self, arg: Markable) -> Markable: ...
+
+        @overload
+        def __call__(
+            self,
+            condition: str | bool = False,
+            *conditions: str | bool,
+            reason: str = ...,
+            run: bool = ...,
+            raises: None | type[BaseException] | tuple[type[BaseException], ...] = ...,
+            strict: bool = ...,
+        ) -> MarkDecorator: ...
+
+    class _ParametrizeMarkDecorator(MarkDecorator):
+        def __call__(  # type: ignore[override]
+            self,
+            argnames: str | Sequence[str],
+            argvalues: Iterable[ParameterSet | Sequence[object] | object],
+            *,
+            indirect: bool | Sequence[str] = ...,
+            ids: Iterable[None | str | float | int | bool]
+            | Callable[[Any], object | None]
+            | None = ...,
+            scope: _ScopeName | None = ...,
+        ) -> MarkDecorator: ...
+
+    class _UsefixturesMarkDecorator(MarkDecorator):
+        def __call__(self, *fixtures: str) -> MarkDecorator:  # type: ignore[override]
+            ...
+
+    class _FilterwarningsMarkDecorator(MarkDecorator):
+        def __call__(self, *filters: str) -> MarkDecorator:  # type: ignore[override]
+            ...
+
+
+@final
+class MarkGenerator:
+    """Factory for :class:`MarkDecorator` objects - exposed as
+    a ``pytest.mark`` singleton instance.
+
+    Example::
+
+         import pytest
+
+
+         @pytest.mark.slowtest
+         def test_function():
+             pass
+
+    applies a 'slowtest' :class:`Mark` on ``test_function``.
+    """
+
+    # See TYPE_CHECKING above.
+    if TYPE_CHECKING:
+        skip: _SkipMarkDecorator
+        skipif: _SkipifMarkDecorator
+        xfail: _XfailMarkDecorator
+        parametrize: _ParametrizeMarkDecorator
+        usefixtures: _UsefixturesMarkDecorator
+        filterwarnings: _FilterwarningsMarkDecorator
+
+    def __init__(self, *, _ispytest: bool = False) -> None:
+        check_ispytest(_ispytest)
+        self._config: Config | None = None
+        self._markers: set[str] = set()
+
+    def __getattr__(self, name: str) -> MarkDecorator:
+        """Generate a new :class:`MarkDecorator` with the given name."""
+        if name[0] == "_":
+            raise AttributeError("Marker name must NOT start with underscore")
+
+        if self._config is not None:
+            # We store a set of markers as a performance optimisation - if a mark
+            # name is in the set we definitely know it, but a mark may be known and
+            # not in the set.  We therefore start by updating the set!
+            if name not in self._markers:
+                for line in self._config.getini("markers"):
+                    # example lines: "skipif(condition): skip the given test if..."
+                    # or "hypothesis: tests which use Hypothesis", so to get the
+                    # marker name we split on both `:` and `(`.
+                    marker = line.split(":")[0].split("(")[0].strip()
+                    self._markers.add(marker)
+
+            # If the name is not in the set of known marks after updating,
+            # then it really is time to issue a warning or an error.
+            if name not in self._markers:
+                if self._config.option.strict_markers or self._config.option.strict:
+                    fail(
+                        f"{name!r} not found in `markers` configuration option",
+                        pytrace=False,
+                    )
+
+                # Raise a specific error for common misspellings of "parametrize".
+                if name in ["parameterize", "parametrise", "parameterise"]:
+                    __tracebackhide__ = True
+                    fail(f"Unknown '{name}' mark, did you mean 'parametrize'?")
+
+                warnings.warn(
+                    f"Unknown pytest.mark.{name} - is this a typo?  You can register "
+                    "custom marks to avoid this warning - for details, see "
+                    "https://docs.pytest.org/en/stable/how-to/mark.html",
+                    PytestUnknownMarkWarning,
+                    2,
+                )
+
+        return MarkDecorator(Mark(name, (), {}, _ispytest=True), _ispytest=True)
+
+
+MARK_GEN = MarkGenerator(_ispytest=True)
+
+
+@final
+class NodeKeywords(MutableMapping[str, Any]):
+    __slots__ = ("node", "parent", "_markers")
+
+    def __init__(self, node: Node) -> None:
+        self.node = node
+        self.parent = node.parent
+        self._markers = {node.name: True}
+
+    def __getitem__(self, key: str) -> Any:
+        try:
+            return self._markers[key]
+        except KeyError:
+            if self.parent is None:
+                raise
+            return self.parent.keywords[key]
+
+    def __setitem__(self, key: str, value: Any) -> None:
+        self._markers[key] = value
+
+    # Note: we could've avoided explicitly implementing some of the methods
+    # below and use the collections.abc fallback, but that would be slow.
+
+    def __contains__(self, key: object) -> bool:
+        return (
+            key in self._markers
+            or self.parent is not None
+            and key in self.parent.keywords
+        )
+
+    def update(  # type: ignore[override]
+        self,
+        other: Mapping[str, Any] | Iterable[tuple[str, Any]] = (),
+        **kwds: Any,
+    ) -> None:
+        self._markers.update(other)
+        self._markers.update(kwds)
+
+    def __delitem__(self, key: str) -> None:
+        raise ValueError("cannot delete key in keywords dict")
+
+    def __iter__(self) -> Iterator[str]:
+        # Doesn't need to be fast.
+        yield from self._markers
+        if self.parent is not None:
+            for keyword in self.parent.keywords:
+                # self._marks and self.parent.keywords can have duplicates.
+                if keyword not in self._markers:
+                    yield keyword
+
+    def __len__(self) -> int:
+        # Doesn't need to be fast.
+        return sum(1 for keyword in self)
+
+    def __repr__(self) -> str:
+        return f"<NodeKeywords for node {self.node}>"
