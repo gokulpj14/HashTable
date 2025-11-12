@@ -1,99 +1,152 @@
-Metadata-Version: 2.1
-Name: Werkzeug
-Version: 3.0.3
-Summary: The comprehensive WSGI web application library.
-Maintainer-email: Pallets <contact@palletsprojects.com>
-Requires-Python: >=3.8
-Description-Content-Type: text/markdown
-Classifier: Development Status :: 5 - Production/Stable
-Classifier: Environment :: Web Environment
+Metadata-Version: 2.4
+Name: pluggy
+Version: 1.6.0
+Summary: plugin and hook calling mechanisms for python
+Author-email: Holger Krekel <holger@merlinux.eu>
+License: MIT
+Classifier: Development Status :: 6 - Mature
 Classifier: Intended Audience :: Developers
-Classifier: License :: OSI Approved :: BSD License
-Classifier: Operating System :: OS Independent
-Classifier: Programming Language :: Python
-Classifier: Topic :: Internet :: WWW/HTTP :: Dynamic Content
-Classifier: Topic :: Internet :: WWW/HTTP :: WSGI
-Classifier: Topic :: Internet :: WWW/HTTP :: WSGI :: Application
-Classifier: Topic :: Internet :: WWW/HTTP :: WSGI :: Middleware
-Classifier: Topic :: Software Development :: Libraries :: Application Frameworks
-Classifier: Typing :: Typed
-Requires-Dist: MarkupSafe>=2.1.1
-Requires-Dist: watchdog>=2.3 ; extra == "watchdog"
-Project-URL: Changes, https://werkzeug.palletsprojects.com/changes/
-Project-URL: Chat, https://discord.gg/pallets
-Project-URL: Documentation, https://werkzeug.palletsprojects.com/
-Project-URL: Donate, https://palletsprojects.com/donate
-Project-URL: Issue Tracker, https://github.com/pallets/werkzeug/issues/
-Project-URL: Source Code, https://github.com/pallets/werkzeug/
-Provides-Extra: watchdog
+Classifier: License :: OSI Approved :: MIT License
+Classifier: Operating System :: POSIX
+Classifier: Operating System :: Microsoft :: Windows
+Classifier: Operating System :: MacOS :: MacOS X
+Classifier: Topic :: Software Development :: Testing
+Classifier: Topic :: Software Development :: Libraries
+Classifier: Topic :: Utilities
+Classifier: Programming Language :: Python :: Implementation :: CPython
+Classifier: Programming Language :: Python :: Implementation :: PyPy
+Classifier: Programming Language :: Python :: 3
+Classifier: Programming Language :: Python :: 3 :: Only
+Classifier: Programming Language :: Python :: 3.9
+Classifier: Programming Language :: Python :: 3.10
+Classifier: Programming Language :: Python :: 3.11
+Classifier: Programming Language :: Python :: 3.12
+Classifier: Programming Language :: Python :: 3.13
+Requires-Python: >=3.9
+Description-Content-Type: text/x-rst
+License-File: LICENSE
+Provides-Extra: dev
+Requires-Dist: pre-commit; extra == "dev"
+Requires-Dist: tox; extra == "dev"
+Provides-Extra: testing
+Requires-Dist: pytest; extra == "testing"
+Requires-Dist: pytest-benchmark; extra == "testing"
+Requires-Dist: coverage; extra == "testing"
+Dynamic: license-file
 
-# Werkzeug
+====================================================
+pluggy - A minimalist production ready plugin system
+====================================================
 
-*werkzeug* German noun: "tool". Etymology: *werk* ("work"), *zeug* ("stuff")
+|pypi| |conda-forge| |versions| |github-actions| |gitter| |black| |codecov|
 
-Werkzeug is a comprehensive [WSGI][] web application library. It began as
-a simple collection of various utilities for WSGI applications and has
-become one of the most advanced WSGI utility libraries.
+This is the core framework used by the `pytest`_, `tox`_, and `devpi`_ projects.
 
-It includes:
+Please `read the docs`_ to learn more!
 
--   An interactive debugger that allows inspecting stack traces and
-    source code in the browser with an interactive interpreter for any
-    frame in the stack.
--   A full-featured request object with objects to interact with
-    headers, query args, form data, files, and cookies.
--   A response object that can wrap other WSGI applications and handle
-    streaming data.
--   A routing system for matching URLs to endpoints and generating URLs
-    for endpoints, with an extensible system for capturing variables
-    from URLs.
--   HTTP utilities to handle entity tags, cache control, dates, user
-    agents, cookies, files, and more.
--   A threaded WSGI server for use while developing applications
-    locally.
--   A test client for simulating HTTP requests during testing without
-    requiring running a server.
+A definitive example
+====================
+.. code-block:: python
 
-Werkzeug doesn't enforce any dependencies. It is up to the developer to
-choose a template engine, database adapter, and even how to handle
-requests. It can be used to build all sorts of end user applications
-such as blogs, wikis, or bulletin boards.
+    import pluggy
 
-[Flask][] wraps Werkzeug, using it to handle the details of WSGI while
-providing more structure and patterns for defining powerful
-applications.
-
-[WSGI]: https://wsgi.readthedocs.io/en/latest/
-[Flask]: https://www.palletsprojects.com/p/flask/
+    hookspec = pluggy.HookspecMarker("myproject")
+    hookimpl = pluggy.HookimplMarker("myproject")
 
 
-## A Simple Example
+    class MySpec:
+        """A hook specification namespace."""
 
-```python
-# save this as app.py
-from werkzeug.wrappers import Request, Response
-
-@Request.application
-def application(request: Request) -> Response:
-    return Response("Hello, World!")
-
-if __name__ == "__main__":
-    from werkzeug.serving import run_simple
-    run_simple("127.0.0.1", 5000, application)
-```
-
-```
-$ python -m app
-  * Running on http://127.0.0.1:5000/ (Press CTRL+C to quit)
-```
+        @hookspec
+        def myhook(self, arg1, arg2):
+            """My special little hook that you can customize."""
 
 
-## Donate
+    class Plugin_1:
+        """A hook implementation namespace."""
 
-The Pallets organization develops and supports Werkzeug and other
-popular packages. In order to grow the community of contributors and
-users, and allow the maintainers to devote more time to the projects,
-[please donate today][].
+        @hookimpl
+        def myhook(self, arg1, arg2):
+            print("inside Plugin_1.myhook()")
+            return arg1 + arg2
 
-[please donate today]: https://palletsprojects.com/donate
 
+    class Plugin_2:
+        """A 2nd hook implementation namespace."""
+
+        @hookimpl
+        def myhook(self, arg1, arg2):
+            print("inside Plugin_2.myhook()")
+            return arg1 - arg2
+
+
+    # create a manager and add the spec
+    pm = pluggy.PluginManager("myproject")
+    pm.add_hookspecs(MySpec)
+
+    # register plugins
+    pm.register(Plugin_1())
+    pm.register(Plugin_2())
+
+    # call our ``myhook`` hook
+    results = pm.hook.myhook(arg1=1, arg2=2)
+    print(results)
+
+
+Running this directly gets us::
+
+    $ python docs/examples/toy-example.py
+    inside Plugin_2.myhook()
+    inside Plugin_1.myhook()
+    [-1, 3]
+
+
+.. badges
+
+.. |pypi| image:: https://img.shields.io/pypi/v/pluggy.svg
+    :target: https://pypi.org/pypi/pluggy
+
+.. |versions| image:: https://img.shields.io/pypi/pyversions/pluggy.svg
+    :target: https://pypi.org/pypi/pluggy
+
+.. |github-actions| image:: https://github.com/pytest-dev/pluggy/workflows/main/badge.svg
+    :target: https://github.com/pytest-dev/pluggy/actions
+
+.. |conda-forge| image:: https://img.shields.io/conda/vn/conda-forge/pluggy.svg
+    :target: https://anaconda.org/conda-forge/pytest
+
+.. |gitter| image:: https://badges.gitter.im/pytest-dev/pluggy.svg
+    :alt: Join the chat at https://gitter.im/pytest-dev/pluggy
+    :target: https://gitter.im/pytest-dev/pluggy?utm_source=badge&utm_medium=badge&utm_campaign=pr-badge&utm_content=badge
+
+.. |black| image:: https://img.shields.io/badge/code%20style-black-000000.svg
+    :target: https://github.com/ambv/black
+
+.. |codecov| image:: https://codecov.io/gh/pytest-dev/pluggy/branch/master/graph/badge.svg
+    :target: https://codecov.io/gh/pytest-dev/pluggy
+    :alt: Code coverage Status
+
+.. links
+.. _pytest:
+    http://pytest.org
+.. _tox:
+    https://tox.readthedocs.org
+.. _devpi:
+    http://doc.devpi.net
+.. _read the docs:
+   https://pluggy.readthedocs.io/en/latest/
+
+
+Support pluggy
+--------------
+
+`Open Collective`_ is an online funding platform for open and transparent communities.
+It provides tools to raise money and share your finances in full transparency.
+
+It is the platform of choice for individuals and companies that want to make one-time or
+monthly donations directly to the project.
+
+``pluggy`` is part of the ``pytest-dev`` project, see more details in the `pytest collective`_.
+
+.. _Open Collective: https://opencollective.com
+.. _pytest collective: https://opencollective.com/pytest
